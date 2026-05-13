@@ -1,174 +1,232 @@
 import { createServerClient } from '@/lib/supabase'
 import Link from 'next/link'
 import ScoreBadge from '@/components/ScoreBadge'
-import { StatusBadge, SourceBadge } from '@/components/StatusBadge'
-import type { Company, Score, Briefing, NewsItem, LvStatus, Source } from '@/lib/types'
+import { SourceBadge } from '@/components/StatusBadge'
+import type { Company, Score, LvStatus, Source } from '@/lib/types'
 
-async function getFeedData() {
-  const sb = createServerClient()
+export const revalidate = 60 // re-render every 60s
 
-  const { data: companies } = await sb
-    .from('companies')
-    .select('*')
-    .not('lv_status', 'eq', 'passed')
-    .order('created_at', { ascending: false })
-    .limit(50)
+const SCORE_THRESHOLD = 6.5
 
-  if (!companies?.length) return { companies: [], scores: {}, briefings: {}, recentNews: [] }
-
-  const ids = companies.map((c: Company) => c.id)
-
-  const [{ data: scores }, { data: briefings }, { data: recentNews }] = await Promise.all([
-    sb.from('scores').select('*').in('company_id', ids).order('scored_at', { ascending: false }),
-    sb.from('briefings').select('*').in('company_id', ids).order('briefed_at', { ascending: false }),
-    sb.from('news_items').select('*').in('company_id', ids).order('news_date', { ascending: false }).limit(30),
-  ])
-
-  const scoreMap: Record<string, Score> = {}
-  scores?.forEach((s: Score) => { if (!scoreMap[s.company_id]) scoreMap[s.company_id] = s })
-
-  const briefingMap: Record<string, Briefing> = {}
-  briefings?.forEach((b: Briefing) => { if (!briefingMap[b.company_id]) briefingMap[b.company_id] = b })
-
-  const sorted = [...companies].sort((a: Company, b: Company) => {
-    const sa = scoreMap[a.id]?.lv_final_score ?? -1
-    const sb2 = scoreMap[b.id]?.lv_final_score ?? -1
-    return sb2 - sa
-  })
-
-  return { companies: sorted, scores: scoreMap, briefings: briefingMap, recentNews: recentNews ?? [] }
+type DayGroup = {
+  dateLabel: string
+  dateKey: string
+  isToday: boolean
+  entries: Array<{ company: Company; score: Score }>
 }
 
-const TODAY = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+async function getDailyFeed(): Promise<{ groups: DayGroup[]; stats: { total: number; todayCount: number; avgScore: string } }> {
+  const sb = createServerClient()
+
+  // Get all scores above threshold with their companies, sorted by scored_at desc
+  const { data: scores } = await sb
+    .from('scores')
+    .select('*, companies(*)')
+    .gte('lv_final_score', SCORE_THRESHOLD)
+    .eq('hard_filter_triggered', false)
+    .order('scored_at', { ascending: false })
+    .limit(200)
+
+  if (!scores?.length) return { groups: [], stats: { total: 0, todayCount: 0, avgScore: '—' } }
+
+  // Also get total pipeline count for stats
+  const { count: total } = await sb.from('companies').select('*', { count: 'exact', head: true }).neq('lv_status', 'passed')
+
+  const todayStr = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+
+  // Deduplicate — keep only the most recent score per company
+  const seenCompanies = new Set<string>()
+  const deduped = scores.filter((s: Score & { companies: Company }) => {
+    if (seenCompanies.has(s.company_id)) return false
+    seenCompanies.add(s.company_id)
+    return true
+  })
+
+  // Group by calendar date of scored_at
+  const groupMap = new Map<string, Array<{ company: Company; score: Score }>>()
+
+  for (const row of deduped) {
+    const company: Company = (row as unknown as { companies: Company }).companies
+    if (!company) continue
+    const dateKey = (row.scored_at ?? row.created_at ?? new Date().toISOString()).slice(0, 10)
+    if (!groupMap.has(dateKey)) groupMap.set(dateKey, [])
+    groupMap.get(dateKey)!.push({ company, score: row as Score })
+  }
+
+  // Sort each group by score desc
+  for (const entries of groupMap.values()) {
+    entries.sort((a, b) => (b.score.lv_final_score ?? 0) - (a.score.lv_final_score ?? 0))
+  }
+
+  // Convert to sorted array of day groups
+  const groups: DayGroup[] = Array.from(groupMap.entries())
+    .sort(([a], [b]) => b.localeCompare(a)) // most recent first
+    .map(([dateKey, entries]) => {
+      const d = new Date(dateKey + 'T12:00:00Z')
+      const isToday = dateKey === todayStr
+      const isYesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10) === dateKey
+      const dateLabel = isToday
+        ? 'Today'
+        : isYesterday
+        ? 'Yesterday'
+        : d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })
+      return { dateKey, dateLabel, isToday, entries }
+    })
+
+  const todayCount = groups.find(g => g.isToday)?.entries.length ?? 0
+  const allScores = deduped.map((s: Score) => s.lv_final_score ?? 0)
+  const avgScore = allScores.length ? (allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length).toFixed(1) : '—'
+
+  return { groups, stats: { total: total ?? 0, todayCount, avgScore } }
+}
 
 export default async function HomePage() {
-  const { companies, scores, briefings, recentNews } = await getFeedData()
+  const { groups, stats } = await getDailyFeed()
 
-  const newsMap: Record<string, NewsItem[]> = {}
-  ;(recentNews as NewsItem[]).forEach((n) => {
-    if (!newsMap[n.company_id]) newsMap[n.company_id] = []
-    newsMap[n.company_id].push(n)
+  const todayFull = new Date().toLocaleDateString('en-GB', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   })
-
-  const topTier = (companies as Company[]).filter((c) => (scores[c.id]?.lv_final_score ?? 0) >= 7)
-  const watchlist = (companies as Company[]).filter((c) => {
-    const s = scores[c.id]?.lv_final_score ?? 0
-    return s < 7 && s >= 5
-  })
-  const unscored = (companies as Company[]).filter((c) => !scores[c.id])
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      {/* Main feed */}
       <div className="lg:col-span-2">
-        <div className="mb-6 pb-3 border-b" style={{ borderColor: 'var(--ft-border)' }}>
+        {/* Masthead */}
+        <div className="mb-6 pb-4 border-b-2" style={{ borderColor: 'var(--lv-burgundy)' }}>
           <p className="text-xs uppercase tracking-widest mb-1" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
-            {TODAY}
+            {todayFull}
           </p>
           <h1 className="text-3xl font-bold" style={{ fontFamily: 'Georgia, serif', color: 'var(--ft-ink)' }}>
-            Deal Intelligence
+            Daily Deal Digest
           </h1>
           <p className="text-sm mt-1" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
-            {(companies as Company[]).length} companies tracked · {topTier.length} above threshold
+            Scored deals above {SCORE_THRESHOLD} · {stats.total} tracked in pipeline
+            {stats.todayCount > 0 && <span className="ml-2 font-semibold" style={{ color: 'var(--lv-burgundy)' }}>· {stats.todayCount} added today</span>}
           </p>
         </div>
 
-        {topTier.length > 0 && (
-          <section className="mb-8">
-            <SectionHeader label="Priority Pipeline" color="var(--lv-burgundy)" />
+        {groups.length === 0 && <EmptyState />}
+
+        {groups.map((group) => (
+          <section key={group.dateKey} className="mb-10">
+            {/* Day header */}
+            <div className="flex items-baseline gap-3 mb-4 pb-2 border-b" style={{ borderColor: 'var(--ft-border)' }}>
+              <h2
+                className="font-bold"
+                style={{
+                  fontFamily: 'Helvetica Neue, Arial, sans-serif',
+                  fontSize: '0.7rem',
+                  letterSpacing: '0.1em',
+                  textTransform: 'uppercase',
+                  color: group.isToday ? 'var(--lv-burgundy)' : 'var(--ft-grey)',
+                }}
+              >
+                {group.dateLabel}
+              </h2>
+              <span className="text-xs" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+                {group.entries.length} deal{group.entries.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+
             <div className="divide-y" style={{ borderColor: 'var(--ft-border)' }}>
-              {topTier.map((company, i) => (
-                <FeedCard key={company.id} rank={i + 1} company={company} score={scores[company.id]} briefing={briefings[company.id]} latestNews={newsMap[company.id]?.[0]} />
+              {group.entries.map((entry, i) => (
+                <DigestCard key={entry.company.id} rank={i + 1} company={entry.company} score={entry.score} isToday={group.isToday} />
               ))}
             </div>
           </section>
-        )}
-
-        {watchlist.length > 0 && (
-          <section className="mb-8">
-            <SectionHeader label="Watchlist" color="#F57C00" />
-            <div className="divide-y" style={{ borderColor: 'var(--ft-border)' }}>
-              {watchlist.map((company, i) => (
-                <FeedCard key={company.id} rank={topTier.length + i + 1} company={company} score={scores[company.id]} briefing={briefings[company.id]} latestNews={newsMap[company.id]?.[0]} />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {unscored.length > 0 && (
-          <section>
-            <SectionHeader label="Awaiting Scoring" color="var(--ft-grey)" />
-            <div className="divide-y" style={{ borderColor: 'var(--ft-border)' }}>
-              {unscored.slice(0, 6).map((company) => (
-                <UnscoredRow key={company.id} company={company} />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {(companies as Company[]).length === 0 && <EmptyState />}
+        ))}
       </div>
 
+      {/* Sidebar */}
       <aside className="space-y-6">
-        <QuickStats companies={companies as Company[]} scores={scores} />
-        <RecentNews recentNews={recentNews as NewsItem[]} companies={companies as Company[]} />
+        <PipelineStats stats={stats} groups={groups} />
+        <ThresholdKey />
         <QuickActions />
       </aside>
     </div>
   )
 }
 
-function SectionHeader({ label, color }: { label: string; color: string }) {
-  return (
-    <div className="flex items-center gap-2 mb-4">
-      <div className="h-3 w-3 rounded-full" style={{ backgroundColor: color }} />
-      <h2 className="text-xs font-bold uppercase tracking-widest" style={{ color, fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>{label}</h2>
-    </div>
-  )
-}
-
-function FeedCard({ rank, company, score, briefing, latestNews }: {
-  rank: number; company: Company; score?: Score; briefing?: Briefing; latestNews?: NewsItem
+function DigestCard({ rank, company, score, isToday }: {
+  rank: number
+  company: Company
+  score: Score
+  isToday: boolean
 }) {
-  const finalScore = score?.lv_final_score
-  const headline = briefing?.headline ?? company.one_liner ?? company.linkedin_description ?? `${company.company_name} — ${company.sector ?? 'Tech'}`
-  const standfirst = briefing?.standfirst ?? company.traction_signals ?? ''
+  const finalScore = score.lv_final_score ?? 0
+  const headline = company.one_liner ?? company.linkedin_description ?? `${company.sector ?? 'Tech'} startup`
+  const traction = company.traction_signals
 
   return (
-    <article className="py-4">
+    <article className="py-4 group">
       <div className="flex gap-4">
-        <div className="flex-shrink-0 w-8 text-center pt-1">
-          <span className="text-2xl font-bold" style={{ color: 'var(--ft-border)', fontFamily: 'Georgia, serif' }}>{rank}</span>
+        {/* Rank */}
+        <div className="flex-shrink-0 w-7 pt-0.5 text-right">
+          <span className="text-sm font-bold" style={{ color: 'var(--ft-border)', fontFamily: 'Georgia, serif' }}>{rank}</span>
         </div>
+
         <div className="flex-1 min-w-0">
+          {/* Badges row */}
           <div className="flex flex-wrap items-center gap-2 mb-1">
-            {finalScore != null && <ScoreBadge score={finalScore} size="sm" />}
-            {company.lv_status && <StatusBadge status={company.lv_status as LvStatus} />}
+            <ScoreBadge score={finalScore} size="sm" />
             {company.source && <SourceBadge source={company.source as Source} />}
+            {score.recommendation && (
+              <span className="text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded"
+                style={{
+                  backgroundColor: score.recommendation === 'Pursue' ? '#E8F5E9' : score.recommendation === 'Conditional' ? '#FFF8E1' : '#FAFAFA',
+                  color: score.recommendation === 'Pursue' ? '#2E7D32' : score.recommendation === 'Conditional' ? '#F57C00' : '#9E9E9E',
+                  fontFamily: 'Helvetica Neue, Arial, sans-serif',
+                  fontSize: '0.6rem',
+                }}>
+                {score.recommendation}
+              </span>
+            )}
           </div>
+
+          {/* Company name */}
           <Link href={`/company/${company.id}`} className="hover:underline">
             <h3 className="text-lg font-bold leading-snug" style={{ color: 'var(--ft-ink)', fontFamily: 'Georgia, serif' }}>
               {company.company_name}
             </h3>
           </Link>
+
+          {/* Headline */}
           {headline && (
             <p className="text-sm mt-0.5 leading-relaxed line-clamp-2" style={{ color: 'var(--ft-grey)', fontFamily: 'Georgia, serif' }}>
               {headline}
             </p>
           )}
-          {standfirst && standfirst !== headline && (
-            <p className="text-xs mt-1 leading-relaxed line-clamp-2 italic" style={{ color: 'var(--ft-grey)' }}>{standfirst}</p>
+
+          {/* Traction / key signals */}
+          {traction && traction !== headline && (
+            <p className="text-xs mt-1.5 italic line-clamp-1" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+              {traction}
+            </p>
           )}
-          {latestNews && (
-            <div className="mt-2 flex items-start gap-1.5">
-              <span className="text-xs font-bold uppercase shrink-0" style={{ color: 'var(--ft-teal)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>News</span>
-              <span className="text-xs leading-snug" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>{latestNews.headline}</span>
-            </div>
+
+          {/* Key risks — one liner if available */}
+          {score.key_risks && Array.isArray(score.key_risks) && (score.key_risks as string[]).length > 0 && (
+            <p className="text-xs mt-1" style={{ color: '#B34A00', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+              ⚠ {(score.key_risks as string[])[0]}
+            </p>
           )}
+
+          {/* Footer metadata */}
           <div className="flex items-center gap-3 mt-2 flex-wrap" style={{ fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
             {company.sector && <span className="text-xs" style={{ color: 'var(--ft-grey)' }}>{company.sector}</span>}
-            {company.stage && <span className="text-xs" style={{ color: 'var(--ft-grey)' }}>{company.stage}</span>}
-            {company.founding_year && <span className="text-xs" style={{ color: 'var(--ft-grey)' }}>Est. {company.founding_year}</span>}
-            <Link href={`/company/${company.id}`} className="text-xs ml-auto hover:underline" style={{ color: 'var(--ft-teal)' }}>Full profile →</Link>
+            {company.stage && (
+              <span className="text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: '#F3F4F6', color: 'var(--ft-grey)' }}>
+                {company.stage}
+              </span>
+            )}
+            {company.raise_amount_min && (
+              <span className="text-xs" style={{ color: 'var(--ft-grey)' }}>
+                £{(company.raise_amount_min / 1_000_000).toFixed(1)}m{company.raise_amount_max ? `–£${(company.raise_amount_max / 1_000_000).toFixed(1)}m` : ''} raise
+              </span>
+            )}
+            <Link href={`/company/${company.id}`} className="text-xs ml-auto opacity-0 group-hover:opacity-100 transition-opacity hover:underline" style={{ color: 'var(--ft-teal)' }}>
+              Full profile →
+            </Link>
           </div>
         </div>
       </div>
@@ -176,37 +234,25 @@ function FeedCard({ rank, company, score, briefing, latestNews }: {
   )
 }
 
-function UnscoredRow({ company }: { company: Company }) {
-  return (
-    <div className="py-3 flex items-center gap-3 flex-wrap">
-      <span className="text-xs px-2 py-0.5 rounded" style={{ backgroundColor: '#F3F4F6', color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>Unscored</span>
-      <Link href={`/company/${company.id}`} className="text-sm hover:underline flex-1" style={{ color: 'var(--ft-ink)', fontFamily: 'Georgia, serif' }}>{company.company_name}</Link>
-      {company.sector && <span className="text-xs" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>{company.sector}</span>}
-      <Link href={`/company/${company.id}`} className="text-xs hover:underline" style={{ color: 'var(--ft-teal)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>Score →</Link>
-    </div>
-  )
-}
-
-function QuickStats({ companies, scores }: { companies: Company[]; scores: Record<string, Score> }) {
-  const statusCount: Record<string, number> = {}
-  companies.forEach((c) => { const s = c.lv_status ?? 'prospect'; statusCount[s] = (statusCount[s] ?? 0) + 1 })
-  const scored = companies.filter((c) => scores[c.id]?.lv_final_score != null)
-  const avgScore = scored.length ? (scored.reduce((sum, c) => sum + (scores[c.id]?.lv_final_score ?? 0), 0) / scored.length).toFixed(1) : '—'
+function PipelineStats({ stats, groups }: { stats: { total: number; todayCount: number; avgScore: string }; groups: DayGroup[] }) {
+  const totalScored = groups.reduce((sum, g) => sum + g.entries.length, 0)
+  const topConviction = groups.flatMap(g => g.entries).filter(e => (e.score.lv_final_score ?? 0) >= 8).length
 
   return (
     <div className="rounded-lg p-4 border" style={{ backgroundColor: 'var(--ft-cream-dark)', borderColor: 'var(--ft-border)' }}>
-      <h3 className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: 'var(--lv-burgundy)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>Pipeline Stats</h3>
-      <div className="grid grid-cols-2 gap-3">
+      <h3 className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: 'var(--lv-burgundy)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+        Pipeline Stats
+      </h3>
+      <div className="grid grid-cols-2 gap-4">
         {[
-          { label: 'Total', value: companies.length },
-          { label: 'Avg Score', value: avgScore },
-          { label: 'Met', value: statusCount['met'] ?? 0 },
-          { label: 'Due Diligence', value: statusCount['due_diligence'] ?? 0 },
-          { label: 'Invested', value: statusCount['invested'] ?? 0 },
-          { label: 'Watching', value: statusCount['watching'] ?? 0 },
+          { label: 'In Pipeline', value: stats.total },
+          { label: 'Avg Score', value: stats.avgScore },
+          { label: 'Above Threshold', value: totalScored },
+          { label: 'High Conviction', value: topConviction },
+          { label: 'Added Today', value: stats.todayCount },
         ].map(({ label, value }) => (
           <div key={label}>
-            <p className="text-2xl font-bold" style={{ fontFamily: 'Georgia, serif' }}>{value}</p>
+            <p className="text-2xl font-bold" style={{ fontFamily: 'Georgia, serif', color: 'var(--ft-ink)' }}>{value}</p>
             <p className="text-xs" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>{label}</p>
           </div>
         ))}
@@ -215,27 +261,27 @@ function QuickStats({ companies, scores }: { companies: Company[]; scores: Recor
   )
 }
 
-function RecentNews({ recentNews, companies }: { recentNews: NewsItem[]; companies: Company[] }) {
-  if (!recentNews.length) return null
-  const nameMap: Record<string, string> = {}
-  companies.forEach((c) => { nameMap[c.id] = c.company_name })
-
+function ThresholdKey() {
   return (
-    <div className="rounded-lg p-4 border" style={{ backgroundColor: 'white', borderColor: 'var(--ft-border)' }}>
-      <h3 className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: 'var(--ft-teal)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>Latest News</h3>
-      <div className="space-y-3">
-        {recentNews.slice(0, 5).map((n) => (
-          <div key={n.id} className="border-b last:border-0 pb-3 last:pb-0" style={{ borderColor: 'var(--ft-border)' }}>
-            <p className="text-xs font-semibold mb-0.5" style={{ color: 'var(--ft-teal)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>{nameMap[n.company_id] ?? n.company_name}</p>
-            <p className="text-xs leading-snug" style={{ fontFamily: 'Georgia, serif' }}>{n.headline}</p>
-            {(n.news_date ?? n.source) && (
-              <p className="text-xs mt-0.5" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
-                {n.news_date ? new Date(n.news_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''}
-                {n.source && ` · ${n.source}`}
-              </p>
-            )}
+    <div className="rounded-lg p-4 border" style={{ borderColor: 'var(--ft-border)', backgroundColor: 'white' }}>
+      <h3 className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>Score Key</h3>
+      <div className="space-y-1.5">
+        {[
+          { range: '8.0 – 10', label: 'High Conviction', color: '#2E7D32' },
+          { range: '7.0 – 7.9', label: 'Proceed to Meeting', color: '#F57C00' },
+          { range: '6.5 – 6.9', label: 'Borderline', color: '#B34A00' },
+        ].map(({ range, label, color }) => (
+          <div key={range} className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+            <span className="text-xs" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+              <span className="font-mono">{range}</span> — {label}
+            </span>
           </div>
         ))}
+        <p className="text-xs mt-2 pt-2 border-t" style={{ borderColor: 'var(--ft-border)', color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+          Deals below {SCORE_THRESHOLD} do not appear here. View all on{' '}
+          <Link href="/pipeline" className="underline" style={{ color: 'var(--ft-teal)' }}>Pipeline</Link>.
+        </p>
       </div>
     </div>
   )
@@ -247,11 +293,12 @@ function QuickActions() {
       <h3 className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: 'var(--ft-grey)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>Quick Actions</h3>
       <div className="space-y-2">
         {[
-          { href: '/import', label: 'Import Specter / Beauhurst CSV' },
-          { href: '/comms', label: 'Log WhatsApp / LinkedIn message' },
-          { href: '/pipeline', label: 'View full pipeline' },
+          { href: '/pipeline', label: 'Full pipeline' },
+          { href: '/import', label: 'Import Specter / Beauhurst' },
+          { href: '/comms', label: 'Log a message' },
         ].map(({ href, label }) => (
-          <Link key={href} href={href} className="block text-sm py-2 px-3 rounded hover:opacity-90 transition-opacity text-center"
+          <Link key={href} href={href}
+            className="block text-sm py-2 px-3 rounded hover:opacity-90 transition-opacity text-center"
             style={{ backgroundColor: 'var(--lv-burgundy)', color: 'white', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
             {label}
           </Link>
@@ -263,10 +310,13 @@ function QuickActions() {
 
 function EmptyState() {
   return (
-    <div className="text-center py-16">
-      <p className="text-xl mb-2" style={{ fontFamily: 'Georgia, serif', color: 'var(--ft-grey)' }}>No deals tracked yet</p>
-      <p className="text-sm mb-6" style={{ fontFamily: 'Helvetica Neue, Arial, sans-serif', color: 'var(--ft-grey)' }}>Import a Specter or Beauhurst CSV to get started</p>
-      <Link href="/import" className="inline-block px-6 py-2 rounded text-white text-sm"
+    <div className="text-center py-16 border rounded-lg" style={{ borderColor: 'var(--ft-border)' }}>
+      <p className="text-xl mb-2" style={{ fontFamily: 'Georgia, serif', color: 'var(--ft-grey)' }}>No scored deals yet</p>
+      <p className="text-sm mb-6" style={{ fontFamily: 'Helvetica Neue, Arial, sans-serif', color: 'var(--ft-grey)' }}>
+        Import companies and run the screener skill to see scored deals here
+      </p>
+      <Link href="/import"
+        className="inline-block px-6 py-2 rounded text-white text-sm"
         style={{ backgroundColor: 'var(--lv-burgundy)', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
         Import Companies
       </Link>
