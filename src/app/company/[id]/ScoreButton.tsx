@@ -27,7 +27,10 @@ export default function ScoreButton({ companyId, company }: { companyId: string;
           market_summary: company.market_summary,
         }),
       })
-      if (!res.ok) throw new Error('Scoring failed')
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
       setDone(true)
       setTimeout(() => window.location.reload(), 1000)
     } catch (e) {
