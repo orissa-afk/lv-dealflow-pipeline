@@ -1,7 +1,8 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
-import { supabase } from '@/lib/supabase'
+import { createSupabaseBrowserClient } from '@/lib/supabase'
+const supabase = createSupabaseBrowserClient()
 import ScoreBadge from '@/components/ScoreBadge'
 import { StatusBadge, SourceBadge } from '@/components/StatusBadge'
 import type { Company, Score, LvStatus, Source } from '@/lib/types'

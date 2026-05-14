@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { createSupabaseBrowserClient } from '@/lib/supabase'
+const supabase = createSupabaseBrowserClient()
 import type { LvStatus } from '@/lib/types'
 import { LV_STATUS_LABELS } from '@/lib/types'
 

@@ -1,6 +1,7 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import SignOutButton from './SignOutButton'
 
 const nav = [
   { href: '/', label: 'Daily Feed' },
@@ -19,17 +20,21 @@ export default function NavBar() {
           <Link href="/" className="font-bold text-lg tracking-wide" style={{ fontFamily: 'Georgia, serif', letterSpacing: '0.05em' }}>
             LOVE VENTURES <span className="font-light text-sm opacity-75 ml-2">DEAL INTELLIGENCE</span>
           </Link>
-          <nav className="flex gap-6 text-sm" style={{ fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
-            {nav.map(({ href, label }) => (
-              <Link
-                key={href}
-                href={href}
-                className={`hover:underline transition-opacity ${pathname === href ? 'opacity-100 font-semibold' : 'opacity-70 hover:opacity-100'}`}
-              >
-                {label}
-              </Link>
-            ))}
-          </nav>
+          <div className="flex items-center gap-6">
+            <nav className="flex gap-6 text-sm" style={{ fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+              {nav.map(({ href, label }) => (
+                <Link
+                  key={href}
+                  href={href}
+                  className={`hover:underline transition-opacity ${pathname === href ? 'opacity-100 font-semibold' : 'opacity-70 hover:opacity-100'}`}
+                >
+                  {label}
+                </Link>
+              ))}
+            </nav>
+            <div style={{ width: '1px', height: '16px', backgroundColor: 'rgba(255,255,255,0.3)' }} />
+            <SignOutButton />
+          </div>
         </div>
       </div>
       <div className="ft-rule" style={{ borderColor: 'var(--ft-border)', marginTop: 0 }} />

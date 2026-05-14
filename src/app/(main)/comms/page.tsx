@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { supabase } from '@/lib/supabase'
+import { createSupabaseBrowserClient } from '@/lib/supabase'
+const supabase = createSupabaseBrowserClient()
 import type { Company, InteractionType } from '@/lib/types'
 import { useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
