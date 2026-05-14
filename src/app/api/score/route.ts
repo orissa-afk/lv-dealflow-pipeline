@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createServerClient } from '@/lib/supabase'
 import { buildScoringPrompt } from '@/lib/scoring-prompt'
 import { calculateLvFinalScore, interpretScore } from '@/lib/types'
+import { syncToAffinity } from '@/lib/affinity'
 import type { ScoreRequest, ScoreResponse } from '@/lib/types'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -111,7 +112,29 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json(result)
+    // Sync to Affinity if score is above threshold and API key is configured
+    let affinityResult: { orgId?: number; error?: string } = {}
+    if (result.lv_final_score >= 6.5 && result.hard_filter_pass && process.env.AFFINITY_API_KEY) {
+      try {
+        const sb2 = createServerClient()
+        const { data: co } = await sb2.from('companies').select('verified_website').eq('id', body.company_id ?? '').single()
+        affinityResult = await syncToAffinity({
+          companyName: body.company_name,
+          website: co?.verified_website ?? null,
+          score: result.lv_final_score,
+          interpretation: result.score_interpretation ?? '',
+          recommendation: result.recommendation ?? '',
+          rationales: result.rationales ?? {},
+          risks: result.key_risks ?? [],
+          questions: result.key_questions ?? [],
+        })
+      } catch (e) {
+        affinityResult = { error: e instanceof Error ? e.message : 'Affinity sync failed' }
+        console.error('Affinity sync error:', e)
+      }
+    }
+
+    return NextResponse.json({ ...result, affinity: affinityResult })
   } catch (error) {
     console.error('Scoring error:', error)
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Scoring failed' }, { status: 500 })

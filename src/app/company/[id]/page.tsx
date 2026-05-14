@@ -8,6 +8,7 @@ import type { Company, Score, Briefing, Interaction, NewsItem, LvStatus, Source,
 import { LV_STATUS_LABELS } from '@/lib/types'
 import ScoreButton from './ScoreButton'
 import StatusUpdater from './StatusUpdater'
+import EmailActions from './EmailActions'
 
 export default async function CompanyPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -65,8 +66,9 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
               )}
             </div>
           </div>
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 min-w-[180px]">
             <ScoreButton companyId={company.id} company={company} />
+            <EmailActions company={company} score={latestScore ?? undefined} />
             <StatusUpdater companyId={company.id} currentStatus={company.lv_status as LvStatus} />
           </div>
         </div>
