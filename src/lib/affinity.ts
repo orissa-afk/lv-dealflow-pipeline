@@ -50,18 +50,20 @@ async function findOrCreateOrg(name: string, website?: string | null): Promise<n
   return created.id
 }
 
-async function addToDealsListIfAbsent(orgId: number): Promise<void> {
-  // Check if already on the list
+async function addToDealsListIfAbsent(orgId: number): Promise<{ alreadyPresent: boolean }> {
   const existing = await affinityFetch(
     `/lists/${DEALS_LIST_ID}/list-entries?organization_id=${orgId}&page_size=1`
   ).catch(() => ({ list_entries: [] }))
 
-  if ((existing.list_entries ?? []).length > 0) return // already there
+  if ((existing.list_entries ?? []).length > 0) {
+    return { alreadyPresent: true }
+  }
 
   await affinityFetch(`/lists/${DEALS_LIST_ID}/list-entries`, {
     method: 'POST',
     body: JSON.stringify({ entity_id: orgId }),
   })
+  return { alreadyPresent: false }
 }
 
 function buildScoreNote(
@@ -107,9 +109,17 @@ export interface AffinitySyncPayload {
   questions: string[]
 }
 
-export async function syncToAffinity(payload: AffinitySyncPayload): Promise<{ orgId: number; listed: boolean; noted: boolean }> {
+export interface AffinitySyncResult {
+  orgId: number
+  listed: boolean
+  noted: boolean
+  /** True when the company was already in the Deals list before this score — indicates prior history in Affinity */
+  priorHistory: boolean
+}
+
+export async function syncToAffinity(payload: AffinitySyncPayload): Promise<AffinitySyncResult> {
   const orgId = await findOrCreateOrg(payload.companyName, payload.website)
-  await addToDealsListIfAbsent(orgId)
+  const { alreadyPresent } = await addToDealsListIfAbsent(orgId)
 
   const noteContent = buildScoreNote(
     payload.companyName,
@@ -129,5 +139,5 @@ export async function syncToAffinity(payload: AffinitySyncPayload): Promise<{ or
     }),
   })
 
-  return { orgId, listed: true, noted: true }
+  return { orgId, listed: true, noted: true, priorHistory: alreadyPresent }
 }

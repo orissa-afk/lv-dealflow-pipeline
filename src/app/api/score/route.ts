@@ -118,7 +118,7 @@ export async function POST(req: NextRequest) {
       try {
         const sb2 = createServerClient()
         const { data: co } = await sb2.from('companies').select('verified_website').eq('id', body.company_id ?? '').single()
-        affinityResult = await syncToAffinity({
+        const syncResult = await syncToAffinity({
           companyName: body.company_name,
           website: co?.verified_website ?? null,
           score: result.lv_final_score,
@@ -128,6 +128,7 @@ export async function POST(req: NextRequest) {
           risks: result.key_risks ?? [],
           questions: result.key_questions ?? [],
         })
+        affinityResult = syncResult
       } catch (e) {
         affinityResult = { error: e instanceof Error ? e.message : 'Affinity sync failed' }
         console.error('Affinity sync error:', e)

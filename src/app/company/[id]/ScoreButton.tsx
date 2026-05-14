@@ -6,10 +6,12 @@ export default function ScoreButton({ companyId, company }: { companyId: string;
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
+  const [priorHistory, setPriorHistory] = useState(false)
 
   async function handleScore() {
     setLoading(true)
     setError('')
+    setPriorHistory(false)
     try {
       const res = await fetch('/api/score', {
         method: 'POST',
@@ -31,8 +33,10 @@ export default function ScoreButton({ companyId, company }: { companyId: string;
         const body = await res.json().catch(() => ({}))
         throw new Error(body.error ?? `HTTP ${res.status}`)
       }
+      const data = await res.json()
+      if (data.affinity?.priorHistory) setPriorHistory(true)
       setDone(true)
-      setTimeout(() => window.location.reload(), 1000)
+      setTimeout(() => window.location.reload(), priorHistory ? 4000 : 1000)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error')
     } finally {
@@ -41,7 +45,7 @@ export default function ScoreButton({ companyId, company }: { companyId: string;
   }
 
   return (
-    <div>
+    <div className="space-y-1">
       <button
         onClick={handleScore}
         disabled={loading}
@@ -50,7 +54,16 @@ export default function ScoreButton({ companyId, company }: { companyId: string;
       >
         {loading ? 'Scoring...' : done ? 'Scored ✓' : 'Score with AI'}
       </button>
-      {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
+
+      {priorHistory && (
+        <div className="rounded p-2 text-xs leading-snug" style={{ backgroundColor: '#FFF3CD', borderLeft: '3px solid #F57C00', fontFamily: 'Helvetica Neue, Arial, sans-serif' }}>
+          <span className="font-bold" style={{ color: '#E65100' }}>⚠ Already in Affinity Deals</span>
+          <br />
+          <span style={{ color: '#6D4C41' }}>This company has prior history — check Affinity for previous interactions before proceeding.</span>
+        </div>
+      )}
+
+      {error && <p className="text-xs text-red-600">{error}</p>}
     </div>
   )
 }
