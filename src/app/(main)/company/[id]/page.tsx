@@ -9,6 +9,16 @@ import { LV_STATUS_LABELS } from '@/lib/types'
 import ScoreButton from './ScoreButton'
 import StatusUpdater from './StatusUpdater'
 import EmailActions from './EmailActions'
+import DOMPurify from 'dompurify'
+
+function sanitizeHtml(html: string | null | undefined) {
+  return html
+    ? DOMPurify.sanitize(html, {
+        ALLOWED_TAGS: ['span', 'p'],
+        ALLOWED_ATTR: ['class'],
+      })
+    : '';
+}
 
 export default async function CompanyPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -84,7 +94,7 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
               <div
                 className="prose prose-sm max-w-none text-sm leading-relaxed"
                 style={{ fontFamily: 'Georgia, serif', color: 'var(--ft-ink)' }}
-                dangerouslySetInnerHTML={{ __html: latestBriefing.body_html }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(latestBriefing.body_html) }}
               />
               {latestScore?.key_risks && (latestScore.key_risks as string[]).length > 0 && (
                 <div className="mt-4">
